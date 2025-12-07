@@ -30,7 +30,7 @@ app.get("/test-db", async (req, res) => {
   }
 });
 
-// 👉 Список номинаций + кандидаты
+// Список номинаций + кандидаты
 app.get("/nominations", async (req, res) => {
   try {
     const query = `
@@ -79,6 +79,90 @@ app.get("/nominations", async (req, res) => {
     res.json({ nominations });
   } catch (error) {
     console.error("Error in /nominations:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// 👉 вспомогательная функция: создаём пользователя, если его ещё нет
+async function ensureUserExists(userId) {
+  await pool.query(
+    `INSERT INTO users (id)
+     VALUES ($1)
+     ON CONFLICT (id) DO NOTHING`,
+    [userId]
+  );
+}
+
+// 👉 отдать голоса пользователя
+app.get("/my-votes", async (req, res) => {
+  try {
+    const userId = req.query.userId;
+    if (!userId) {
+      return res.status(400).json({ error: "userId is required" });
+    }
+
+    const result = await pool.query(
+      `SELECT nomination_id, nominee_id
+       FROM votes
+       WHERE user_id = $1`,
+      [userId]
+    );
+
+    const votes = {};
+    for (const row of result.rows) {
+      votes[row.nomination_id] = row.nominee_id;
+    }
+
+    res.json({ votes });
+  } catch (error) {
+    console.error("Error in /my-votes:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// 👉 проголосовать
+app.post("/vote", async (req, res) => {
+  try {
+    const { userId, nominationId, nomineeId } = req.body;
+
+    if (!userId || !nominationId || !nomineeId) {
+      return res.status(400).json({ error: "userId, nominationId и nomineeId обязательны" });
+    }
+
+    // убеждаемся, что номинант существует и принадлежит номинации
+    const nomineeCheck = await pool.query(
+      `SELECT nomination_id FROM nominees WHERE id = $1`,
+      [nomineeId]
+    );
+
+    if (nomineeCheck.rows.length === 0) {
+      return res.status(400).json({ error: "Номинант не найден" });
+    }
+
+    const realNominationId = nomineeCheck.rows[0].nomination_id;
+    if (Number(realNominationId) !== Number(nominationId)) {
+      return res.status(400).json({ error: "Номинант не принадлежит указанной номинации" });
+    }
+
+    // создаём пользователя, если его ещё нет
+    await ensureUserExists(userId);
+
+    // убираем прошлый голос в этой номинации
+    await pool.query(
+      `DELETE FROM votes WHERE user_id = $1 AND nomination_id = $2`,
+      [userId, nominationId]
+    );
+
+    // вставляем новый голос
+    await pool.query(
+      `INSERT INTO votes (user_id, nomination_id, nominee_id)
+       VALUES ($1, $2, $3)`,
+      [userId, nominationId, nomineeId]
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Error in /vote:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 });
