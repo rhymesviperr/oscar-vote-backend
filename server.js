@@ -4,15 +4,17 @@ import dotenv from "dotenv";
 import pkg from "pg";
 
 dotenv.config();
+
 const { Pool } = pkg;
 
 const app = express();
+
 app.use(cors());
 app.use(express.json());
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+  ssl: { rejectUnauthorized: false },
 });
 
 // Тест: жив ли сервер
@@ -26,6 +28,7 @@ app.get("/test-db", async (req, res) => {
     const result = await pool.query("SELECT NOW()");
     res.json({ time: result.rows[0] });
   } catch (error) {
+    console.error("Error in /test-db:", error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -39,6 +42,7 @@ app.get("/nominations", async (req, res) => {
         n.title AS nomination_title,
         n.description AS nomination_description,
         n.position AS nomination_position,
+        n.image_url AS nomination_image_url,
         nom.id AS nominee_id,
         nom.name AS nominee_name,
         nom.image_url AS nominee_image_url,
@@ -61,7 +65,8 @@ app.get("/nominations", async (req, res) => {
           title: row.nomination_title,
           description: row.nomination_description,
           position: row.nomination_position,
-          nominees: []
+          imageUrl: row.nomination_image_url || null, // ← КАРТИНКА НОМИНАЦИИ
+          nominees: [],
         });
       }
 
@@ -69,13 +74,14 @@ app.get("/nominations", async (req, res) => {
         nominationsMap.get(nId).nominees.push({
           id: row.nominee_id,
           name: row.nominee_name,
-          imageUrl: row.nominee_image_url,
-          position: row.nominee_position
+          imageUrl: row.nominee_image_url || null, // ← КАРТИНКА НОМИНАНТА (как и было)
+          position: row.nominee_position,
         });
       }
     }
 
     const nominations = Array.from(nominationsMap.values());
+
     res.json({ nominations });
   } catch (error) {
     console.error("Error in /nominations:", error);
@@ -86,9 +92,11 @@ app.get("/nominations", async (req, res) => {
 // 👉 вспомогательная функция: создаём пользователя, если его ещё нет
 async function ensureUserExists(userId) {
   await pool.query(
-    `INSERT INTO users (id)
-     VALUES ($1)
-     ON CONFLICT (id) DO NOTHING`,
+    `
+      INSERT INTO users (id)
+      VALUES ($1)
+      ON CONFLICT (id) DO NOTHING
+    `,
     [userId]
   );
 }
@@ -97,14 +105,17 @@ async function ensureUserExists(userId) {
 app.get("/my-votes", async (req, res) => {
   try {
     const userId = req.query.userId;
+
     if (!userId) {
       return res.status(400).json({ error: "userId is required" });
     }
 
     const result = await pool.query(
-      `SELECT nomination_id, nominee_id
-       FROM votes
-       WHERE user_id = $1`,
+      `
+        SELECT nomination_id, nominee_id
+        FROM votes
+        WHERE user_id = $1
+      `,
       [userId]
     );
 
@@ -126,12 +137,18 @@ app.post("/vote", async (req, res) => {
     const { userId, nominationId, nomineeId } = req.body;
 
     if (!userId || !nominationId || !nomineeId) {
-      return res.status(400).json({ error: "userId, nominationId и nomineeId обязательны" });
+      return res
+        .status(400)
+        .json({ error: "userId, nominationId и nomineeId обязательны" });
     }
 
     // убеждаемся, что номинант существует и принадлежит номинации
     const nomineeCheck = await pool.query(
-      `SELECT nomination_id FROM nominees WHERE id = $1`,
+      `
+        SELECT nomination_id
+        FROM nominees
+        WHERE id = $1
+      `,
       [nomineeId]
     );
 
@@ -140,8 +157,11 @@ app.post("/vote", async (req, res) => {
     }
 
     const realNominationId = nomineeCheck.rows[0].nomination_id;
+
     if (Number(realNominationId) !== Number(nominationId)) {
-      return res.status(400).json({ error: "Номинант не принадлежит указанной номинации" });
+      return res
+        .status(400)
+        .json({ error: "Номинант не принадлежит указанной номинации" });
     }
 
     // создаём пользователя, если его ещё нет
@@ -149,14 +169,20 @@ app.post("/vote", async (req, res) => {
 
     // убираем прошлый голос в этой номинации
     await pool.query(
-      `DELETE FROM votes WHERE user_id = $1 AND nomination_id = $2`,
+      `
+        DELETE FROM votes
+        WHERE user_id = $1
+          AND nomination_id = $2
+      `,
       [userId, nominationId]
     );
 
     // вставляем новый голос
     await pool.query(
-      `INSERT INTO votes (user_id, nomination_id, nominee_id)
-       VALUES ($1, $2, $3)`,
+      `
+        INSERT INTO votes (user_id, nomination_id, nominee_id)
+        VALUES ($1, $2, $3)
+      `,
       [userId, nominationId, nomineeId]
     );
 
