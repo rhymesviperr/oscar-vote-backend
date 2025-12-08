@@ -31,38 +31,64 @@ app.get("/test-db", async (req, res) => {
 });
 
 // Список номинаций + кандидаты
-app.get("/nominations", async (req, res) => {
+app.get('/nominations', async (req, res) => {
   try {
-    const query = `
+    // 1. Получаем все номинации
+    const { rows: nominationRows } = await pool.query(`
       SELECT
-        n.id AS nomination_id,
-        n.title AS nomination_title,
-        n.description AS nomination_description,
-        n.position AS nomination_position,
-        nom.id AS nominee_id,
-        nom.name AS nominee_name,
-        nom.image_url AS nominee_image_url,
-        nom.position AS nominee_position
-      FROM nominations n
-      LEFT JOIN nominees nom ON nom.nomination_id = n.id
-      ORDER BY n.position, nom.position;
-    `;
+        id,
+        title,
+        description,
+        position,
+        image_url AS "imageUrl"
+      FROM nominations
+      ORDER BY position ASC
+    `);
 
-    const result = await pool.query(query);
+    // 2. Получаем всех номинантов
+    const { rows: nomineeRows } = await pool.query(`
+      SELECT
+        id,
+        nomination_id,
+        name,
+        position,
+        image_url AS "imageUrl"
+      FROM nominees
+      ORDER BY position ASC
+    `);
 
-    const nominationsMap = new Map();
+    // 3. Группируем номинантов по nomination_id
+    const nomineesByNomination = {};
+    for (const nominee of nomineeRows) {
+      const nId = nominee.nomination_id;
+      if (!nomineesByNomination[nId]) {
+        nomineesByNomination[nId] = [];
+      }
+      nomineesByNomination[nId].push({
+        id: nominee.id,
+        name: nominee.name,
+        position: nominee.position,
+        imageUrl: nominee.imageUrl || null
+      });
+    }
 
-    for (const row of result.rows) {
-      const nId = row.nomination_id;
+    // 4. Собираем итоговый массив номинаций в нужном формате
+    const nominations = nominationRows.map(row => ({
+      id: row.id,
+      title: row.title,
+      description: row.description,
+      position: row.position,
+      imageUrl: row.imageUrl || null,
+      nominees: nomineesByNomination[row.id] || []
+    }));
 
-      if (!nominationsMap.has(nId)) {
-        nominationsMap.set(nId, {
-          id: nId,
-          title: row.nomination_title,
-          description: row.nomination_description,
-          position: row.nomination_position,
-          nominees: []
-        });
+    // 5. Отдаём ответ в том же формате, что ты мне присылал
+    res.json({ nominations });
+  } catch (err) {
+    console.error('Error in /nominations:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
       }
 
       if (row.nominee_id) {
