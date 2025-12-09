@@ -31,37 +31,43 @@ app.get("/test-db", async (req, res) => {
   }
 });
 
-// Список номинаций + кандидаты
+// ===== Список номинаций + кандидаты (с картинкой номинации!) =====
 app.get("/nominations", async (req, res) => {
   try {
     const query = `
       SELECT
-        n.id AS nomination_id,
-        n.title AS nomination_title,
+        n.id          AS nomination_id,
+        n.title       AS nomination_title,
         n.description AS nomination_description,
-        n.position AS nomination_position,
-        nom.id AS nominee_id,
-        nom.name AS nominee_name,
+        n.position    AS nomination_position,
+        n.image_url   AS nomination_image_url,   -- 🔥 картинка НОМИНАЦИИ
+
+        nom.id        AS nominee_id,
+        nom.name      AS nominee_name,
         nom.image_url AS nominee_image_url,
-        nom.position AS nominee_position
+        nom.position  AS nominee_position
       FROM nominations n
       LEFT JOIN nominees nom ON nom.nomination_id = n.id
       ORDER BY n.position, nom.position;
     `;
-    const result = await pool.query(query);
 
+    const result = await pool.query(query);
     const nominationsMap = new Map();
+
     for (const row of result.rows) {
       const nId = row.nomination_id;
+
       if (!nominationsMap.has(nId)) {
         nominationsMap.set(nId, {
           id: nId,
           title: row.nomination_title,
           description: row.nomination_description,
           position: row.nomination_position,
+          imageUrl: row.nomination_image_url,  // 👈 идёт в JSON
           nominees: []
         });
       }
+
       if (row.nominee_id) {
         nominationsMap.get(nId).nominees.push({
           id: row.nominee_id,
@@ -121,7 +127,6 @@ app.get("/my-votes", async (req, res) => {
 app.post("/vote", async (req, res) => {
   try {
     const { userId, nominationId, nomineeId } = req.body;
-
     if (!userId || !nominationId || !nomineeId) {
       return res
         .status(400)
@@ -133,9 +138,11 @@ app.post("/vote", async (req, res) => {
       `SELECT nomination_id FROM nominees WHERE id = $1`,
       [nomineeId]
     );
+
     if (nomineeCheck.rows.length === 0) {
       return res.status(400).json({ error: "Номинант не найден" });
     }
+
     const realNominationId = nomineeCheck.rows[0].nomination_id;
     if (Number(realNominationId) !== Number(nominationId)) {
       return res
@@ -170,14 +177,12 @@ app.post("/vote", async (req, res) => {
 app.post("/unvote", async (req, res) => {
   try {
     const { userId, nominationId } = req.body;
-
     if (!userId || !nominationId) {
       return res
         .status(400)
         .json({ error: "userId и nominationId обязательны" });
     }
 
-    // при желании можно тоже ensureUserExists, но для удаления это не критично
     await pool.query(
       `DELETE FROM votes WHERE user_id = $1 AND nomination_id = $2`,
       [userId, nominationId]
