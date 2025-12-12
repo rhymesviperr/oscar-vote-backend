@@ -279,4 +279,63 @@ app.get("/results", async (req, res) => {
 });
 
 const PORT = process.env.PORT || 10000;
+// ===== ADMIN =====
+
+function checkAdmin(req, res, next) {
+  const token = req.headers["x-admin-token"];
+  if (!token || token !== process.env.ADMIN_TOKEN) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  next();
+}
+
+// получить текущие статусы
+app.get("/admin/status", checkAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT key, value FROM settings WHERE key IN ('voting_open', 'results_published')`
+    );
+
+    const status = {
+      voting_open: false,
+      results_published: false,
+    };
+
+    for (const row of result.rows) {
+      status[row.key] = row.value === "true";
+    }
+
+    res.json(status);
+  } catch (e) {
+    console.error("admin/status error:", e);
+    res.status(500).json({ error: "Internal error" });
+  }
+});
+
+// изменить статус
+app.post("/admin/status", checkAdmin, async (req, res) => {
+  const { key, value } = req.body;
+
+  if (!["voting_open", "results_published"].includes(key)) {
+    return res.status(400).json({ error: "Invalid key" });
+  }
+
+  try {
+    await pool.query(
+      `
+      INSERT INTO settings (key, value)
+      VALUES ($1, $2)
+      ON CONFLICT (key)
+      DO UPDATE SET value = EXCLUDED.value
+      `,
+      [key, value ? "true" : "false"]
+    );
+
+    res.json({ success: true });
+  } catch (e) {
+    console.error("admin/status POST error:", e);
+    res.status(500).json({ error: "Internal error" });
+  }
+});
+
 app.listen(PORT, () => console.log("Server running on " + PORT));
