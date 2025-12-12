@@ -13,8 +13,35 @@ app.use(express.json());
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+  ssl: { rejectUnauthorized: false },
 });
+
+// ===== helpers =====
+async function getSetting(key, defaultValue = null) {
+  const r = await pool.query(
+    `SELECT value FROM settings WHERE key = $1 LIMIT 1`,
+    [key]
+  );
+  if (!r.rows.length) return defaultValue;
+  return r.rows[0].value;
+}
+
+async function getSettingBool(key, defaultValue = false) {
+  const v = await getSetting(key, defaultValue ? "true" : "false");
+  return String(v).toLowerCase() === "true";
+}
+
+// создаём пользователя, если его ещё нет
+async function ensureUserExists(userId) {
+  await pool.query(
+    `INSERT INTO users (id)
+     VALUES ($1)
+     ON CONFLICT (id) DO NOTHING`,
+    [userId]
+  );
+}
+
+// ===== routes =====
 
 // Тест: жив ли сервер
 app.get("/", (req, res) => {
@@ -31,23 +58,37 @@ app.get("/test-db", async (req, res) => {
   }
 });
 
-// ===== Список номинаций + кандидаты (с картинкой номинации!) =====
+// Статус: открыт ли vote + опубликованы ли итоги
+app.get("/status", async (req, res) => {
+  try {
+    const votingOpen = await getSettingBool("voting_open", true);
+    const resultsPublished = await getSettingBool("results_published", false);
+    res.json({ votingOpen, resultsPublished });
+  } catch (error) {
+    console.error("Error in /status:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Список номинаций + номинанты
 app.get("/nominations", async (req, res) => {
   try {
     const query = `
       SELECT
-        n.id          AS nomination_id,
-        n.title       AS nomination_title,
-        n.description AS nomination_description,
-        n.position    AS nomination_position,
-        n.image_url   AS nomination_image_url,   -- 🔥 картинка НОМИНАЦИИ
+        n.id           AS nomination_id,
+        n.title        AS nomination_title,
+        n.description  AS nomination_description,
+        n.position     AS nomination_position,
+        n.imageurl     AS nomination_image_url,
+        n.is_published AS nomination_is_published,
 
-        nom.id        AS nominee_id,
-        nom.name      AS nominee_name,
-        nom.image_url AS nominee_image_url,
-        nom.position  AS nominee_position
+        nom.id         AS nominee_id,
+        nom.name       AS nominee_name,
+        nom.image_url  AS nominee_image_url,
+        nom.position   AS nominee_position
       FROM nominations n
       LEFT JOIN nominees nom ON nom.nomination_id = n.id
+      WHERE COALESCE(n.is_published, TRUE) = TRUE
       ORDER BY n.position, nom.position;
     `;
 
@@ -63,8 +104,8 @@ app.get("/nominations", async (req, res) => {
           title: row.nomination_title,
           description: row.nomination_description,
           position: row.nomination_position,
-          imageUrl: row.nomination_image_url,  // 👈 идёт в JSON
-          nominees: []
+          imageUrl: row.nomination_image_url,
+          nominees: [],
         });
       }
 
@@ -73,30 +114,19 @@ app.get("/nominations", async (req, res) => {
           id: row.nominee_id,
           name: row.nominee_name,
           imageUrl: row.nominee_image_url,
-          position: row.nominee_position
+          position: row.nominee_position,
         });
       }
     }
 
-    const nominations = Array.from(nominationsMap.values());
-    res.json({ nominations });
+    res.json({ nominations: Array.from(nominationsMap.values()) });
   } catch (error) {
     console.error("Error in /nominations:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 });
 
-// 👉 вспомогательная функция: создаём пользователя, если его ещё нет
-async function ensureUserExists(userId) {
-  await pool.query(
-    `INSERT INTO users (id)
-     VALUES ($1)
-     ON CONFLICT (id) DO NOTHING`,
-    [userId]
-  );
-}
-
-// 👉 отдать голоса пользователя
+// Отдать голоса пользователя
 app.get("/my-votes", async (req, res) => {
   try {
     const userId = req.query.userId;
@@ -123,7 +153,7 @@ app.get("/my-votes", async (req, res) => {
   }
 });
 
-// 👉 проголосовать
+// Проголосовать (UPSERT: можно менять голос сколько угодно раз)
 app.post("/vote", async (req, res) => {
   try {
     const { userId, nominationId, nomineeId } = req.body;
@@ -133,7 +163,12 @@ app.post("/vote", async (req, res) => {
         .json({ error: "userId, nominationId и nomineeId обязательны" });
     }
 
-    // убеждаемся, что номинант существует и принадлежит номинации
+    const votingOpen = await getSettingBool("voting_open", true);
+    if (!votingOpen) {
+      return res.status(403).json({ error: "Голосование завершено" });
+    }
+
+    // проверяем, что номинант существует и принадлежит номинации
     const nomineeCheck = await pool.query(
       `SELECT nomination_id FROM nominees WHERE id = $1`,
       [nomineeId]
@@ -150,19 +185,14 @@ app.post("/vote", async (req, res) => {
         .json({ error: "Номинант не принадлежит указанной номинации" });
     }
 
-    // создаём пользователя, если его ещё нет
     await ensureUserExists(userId);
 
-    // убираем прошлый голос в этой номинации
-    await pool.query(
-      `DELETE FROM votes WHERE user_id = $1 AND nomination_id = $2`,
-      [userId, nominationId]
-    );
-
-    // вставляем новый голос
+    // ВАЖНО: у тебя уже есть уникальность (user_id, nomination_id)
     await pool.query(
       `INSERT INTO votes (user_id, nomination_id, nominee_id)
-       VALUES ($1, $2, $3)`,
+       VALUES ($1, $2, $3)
+       ON CONFLICT (user_id, nomination_id)
+       DO UPDATE SET nominee_id = EXCLUDED.nominee_id`,
       [userId, nominationId, nomineeId]
     );
 
@@ -173,7 +203,7 @@ app.post("/vote", async (req, res) => {
   }
 });
 
-// 👉 отменить голос (удалить из базы)
+// Отменить голос
 app.post("/unvote", async (req, res) => {
   try {
     const { userId, nominationId } = req.body;
@@ -181,6 +211,11 @@ app.post("/unvote", async (req, res) => {
       return res
         .status(400)
         .json({ error: "userId и nominationId обязательны" });
+    }
+
+    const votingOpen = await getSettingBool("voting_open", true);
+    if (!votingOpen) {
+      return res.status(403).json({ error: "Голосование завершено" });
     }
 
     await pool.query(
@@ -191,6 +226,54 @@ app.post("/unvote", async (req, res) => {
     res.json({ success: true });
   } catch (error) {
     console.error("Error in /unvote:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Итоги (только если results_published = true)
+app.get("/results", async (req, res) => {
+  try {
+    const resultsPublished = await getSettingBool("results_published", false);
+    if (!resultsPublished) {
+      return res.status(403).json({ error: "Итоги ещё не опубликованы" });
+    }
+
+    const query = `
+      SELECT
+        n.id        AS nomination_id,
+        n.title     AS nomination_title,
+        n.position  AS nomination_position,
+        n.imageurl  AS nomination_image_url,
+
+        nm.id       AS nominee_id,
+        nm.name     AS nominee_name,
+        nm.image_url AS nominee_image_url
+      FROM winners w
+      JOIN nominations n ON n.id = w.nomination_id
+      JOIN nominees nm ON nm.id = w.nominee_id
+      WHERE COALESCE(n.is_published, TRUE) = TRUE
+      ORDER BY n.position;
+    `;
+
+    const r = await pool.query(query);
+
+    const results = r.rows.map((row) => ({
+      nomination: {
+        id: row.nomination_id,
+        title: row.nomination_title,
+        position: row.nomination_position,
+        imageUrl: row.nomination_image_url,
+      },
+      winner: {
+        id: row.nominee_id,
+        name: row.nominee_name,
+        imageUrl: row.nominee_image_url,
+      },
+    }));
+
+    res.json({ results });
+  } catch (error) {
+    console.error("Error in /results:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 });
